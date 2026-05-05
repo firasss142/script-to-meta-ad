@@ -1,0 +1,19 @@
+# Archon repo-level config
+# Inherits global defaults from ~/.archon/config.yaml.
+
+assistant: claude
+
+worktree:
+  # Git-ignored files to copy into each worktree run. Phase specs call
+  # Python/Node scripts that need these secrets and local configs.
+  copyFiles:
+    - .env
+    - .env.local
+
+defaults:
+  loadDefaultCommands: true
+  loadDefaultWorkflows: true
+
+commands:
+  folder: .archon/commands
+  autoLoad: true

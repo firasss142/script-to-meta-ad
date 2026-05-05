@@ -1,0 +1,1151 @@
+name: script-to-meta-ad
+description: |
+  Build a vertical Meta/Facebook ad creative from a finished Tunisian Darija
+  ad script. Runs alongside `remotion-idea-to-video` — both share the same
+  Remotion project at the repo root, accumulating compositions into one
+  library.
+
+  Input via `$ARGUMENTS`:
+    "script <path-to-md>"            — vertical 9:16 (default)
+    "script <path-to-md> 9:16"       — explicit Reels/Stories 1080×1920
+    "script <path-to-md> 4:5"        — in-feed 1080×1350
+    "script <path-to-md> 1:1"        — square 1080×1080
+
+  Designed for muted-autoplay-native Facebook feed creatives:
+    - Words are sacred — script narration is verbatim, on-screen as captions
+    - No TTS — user records their own Darija voice in post over the silent
+      mp4. Captions are calibrated for both reading AND speaking pace.
+    - Vertical safe areas reserved for Meta UI overlays (12% top, 18% bottom)
+    - Arabic RTL with French loanword inline styling
+    - Mixed editorial + DR visual style: premium dark editorial body with
+      DR-style punches (red ❌ / green ✅ comparison, kinetic CTA, urgency)
+
+  Some scenes delegate to AI video tools (Veo/Kling/Sora) for cinematic
+  b-roll Remotion can't produce well — opening hooks, photorealistic
+  emotional shots, character-continuity scenes. The planner classifies
+  each scene as `remotion | ai-clip | hybrid` and emits tool-agnostic
+  prompts (start frame + end frame + motion prompt). The workflow halts
+  cleanly at `clip-readiness-check` when delegated clips are missing,
+  writes a copy-paste-ready `CLIPS-NEEDED.md`, and resumes from there
+  when re-run with the same workflow_run_id once clips are dropped into
+  `public/clips/<CompId>/`.
+
+  Hard moderation rules baked into the planner:
+    - At least 50% of scenes must be `kind: remotion`
+    - The CTA scene MUST be `kind: remotion` (legibility is non-negotiable)
+    - The comparison-panel scene (e.g. "biometric ❌ / Excel ❌ / Xshift ✅")
+      MUST be `kind: remotion`
+    - Hooks MAY be `kind: ai-clip` or `kind: hybrid`
+
+  Audio layers — both opt-in via env (no voice in this workflow):
+    SFX:    SFX_PROVIDER   = elevenlabs | none   (opt-in)
+    Music:  MUSIC_PROVIDER = elevenlabs | none   (opt-in, paid tier)
+
+  Brand overlay is optional — drop a `.archon/brand.yaml` (see
+  `.archon/brand.example.yaml`) to control palette, Arabic font, accent
+  red/green, aspect-ratio default. Missing file ⇒ neutral defaults.
+
+  Archive: when `RENDER_ENABLED=true` (default), the final mp4 is rendered
+  with chapter markers from captions.json (per-scene + per-beat) so when
+  you record voice in post, your editor's timeline shows the boundaries.
+  Archive copy lands at `./videos/<YYYY-MM-DD>-<slug>/`.
+
+  Requires the `remotion-best-practices` skill
+  (`npx skills add remotion-dev/skills --yes`). The `visual-diagrams`
+  skill is used when the plan calls for a comparison panel.
+
+provider: claude
+model: sonnet
+
+nodes:
+  # ── Layer 0: Preflight ─────────────────────────────────────────────
+
+  - id: check-skill
+    bash: |
+      set -eu
+      if   [ -e ".claude/skills/remotion-best-practices/SKILL.md" ] \
+        || [ -e ".agents/skills/remotion-best-practices/SKILL.md" ] \
+        || [ -e "$HOME/.claude/skills/remotion-best-practices/SKILL.md" ]; then
+        echo "remotion-best-practices: installed"
+      else
+        cat >&2 <<'MSG'
+      FATAL: the remotion-best-practices skill is not installed.
+
+      Install once with:
+
+          npx skills add remotion-dev/skills --yes
+
+      Then re-run this workflow.
+      MSG
+        exit 1
+      fi
+
+      if   [ -e ".claude/skills/visual-diagrams/SKILL.md" ] \
+        || [ -e "$HOME/.claude/skills/visual-diagrams/SKILL.md" ]; then
+        echo "visual-diagrams: installed"
+      else
+        echo "visual-diagrams: not installed (comparison panels will use a vendored fallback)"
+      fi
+    timeout: 15000
+
+  # ── Layer 1: Parse script + bootstrap Remotion project (parallel) ──
+
+  - id: parse-script
+    bash: |
+      set -euo pipefail
+
+      ARGS="${ARGUMENTS:-}"
+      ARGS_TRIMMED=$(printf '%s' "$ARGS" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
+      if [ -z "$ARGS_TRIMMED" ]; then
+        echo "FATAL: $ARGUMENTS is empty — usage: 'script <path-to-md> [9:16|4:5|1:1]'" >&2
+        exit 1
+      fi
+
+      MODE_TOKEN=$(printf '%s' "$ARGS_TRIMMED" | awk '{print $1}')
+      if [ "$MODE_TOKEN" != "script" ]; then
+        echo "FATAL: this workflow only accepts 'script <path>' mode (got '$MODE_TOKEN')" >&2
+        exit 1
+      fi
+
+      SCRIPT_PATH=$(printf '%s' "$ARGS_TRIMMED" | awk '{print $2}')
+      if [ -z "$SCRIPT_PATH" ]; then
+        echo "FATAL: missing path. Usage: 'script <path-to-md> [9:16|4:5|1:1]'" >&2
+        exit 1
+      fi
+      if [ ! -f "$SCRIPT_PATH" ]; then
+        echo "FATAL: script file not found: $SCRIPT_PATH" >&2
+        exit 1
+      fi
+
+      RATIO_TOKEN=$(printf '%s' "$ARGS_TRIMMED" | awk '{print $3}')
+      if [ -z "$RATIO_TOKEN" ]; then
+        # Fall back to brand.yaml default_aspect_ratio if present, else 9:16.
+        if [ -f .archon/brand.yaml ]; then
+          RATIO_TOKEN=$(grep -E '^default_aspect_ratio:' .archon/brand.yaml | head -1 | sed -E 's/^default_aspect_ratio:[[:space:]]*"?([^"#]+)"?.*$/\1/' | tr -d '[:space:]')
+        fi
+        [ -z "$RATIO_TOKEN" ] && RATIO_TOKEN="9:16"
+      fi
+
+      case "$RATIO_TOKEN" in
+        9:16)  WIDTH=1080; HEIGHT=1920 ;;
+        4:5)   WIDTH=1080; HEIGHT=1350 ;;
+        1:1)   WIDTH=1080; HEIGHT=1080 ;;
+        *)     echo "FATAL: unsupported aspect ratio '$RATIO_TOKEN' (expected 9:16 | 4:5 | 1:1)" >&2; exit 1 ;;
+      esac
+
+      # Derive title from filename (strip .md, normalize, PascalCase).
+      BASENAME=$(basename "$SCRIPT_PATH" .md)
+      # AD-COPY-3 → AdCopy3, ad_copy_1 → AdCopy1, my-script.v2 → MyScriptV2
+      TITLE=$(printf '%s' "$BASENAME" \
+        | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+        | LC_ALL=C sed -E 's/[^a-z0-9]+/ /g' \
+        | awk '{for(i=1;i<=NF;i++){ $i = toupper(substr($i,1,1)) substr($i,2) }; print}' \
+        | LC_ALL=C tr -d ' ' \
+        | cut -c1-48)
+      if [ -z "$TITLE" ] || ! printf '%s' "$TITLE" | grep -qE '^[A-Za-z]'; then
+        TITLE="MetaAd$(date +%s)"
+      fi
+
+      mkdir -p "$ARTIFACTS_DIR"
+
+      # Copy script verbatim — Arabic + loanwords preserved exactly.
+      cp "$SCRIPT_PATH" "$ARTIFACTS_DIR/article-body.md"
+
+      cat > "$ARTIFACTS_DIR/article.json" <<EOF
+      {
+        "mode": "script",
+        "title": "$TITLE",
+        "source_path": "$SCRIPT_PATH",
+        "language": "ar-TN",
+        "aspect_ratio": "$RATIO_TOKEN",
+        "width": $WIDTH,
+        "height": $HEIGHT,
+        "url": ""
+      }
+      EOF
+
+      echo "title=$TITLE"
+      echo "source_path=$SCRIPT_PATH"
+      echo "aspect_ratio=$RATIO_TOKEN ($WIDTH×$HEIGHT)"
+    depends_on: [check-skill]
+    timeout: 15000
+
+  - id: derive-slug
+    bash: |
+      set -euo pipefail
+      TITLE=$(jq -r '.title' "$ARTIFACTS_DIR/article.json")
+      COMP_ID="$TITLE"
+
+      FS_SLUG=$(printf '%s' "$TITLE" \
+        | LC_ALL=C sed -E 's/([a-z0-9])([A-Z])/\1-\2/g' \
+        | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+        | LC_ALL=C sed -E 's/[^a-z0-9]+/-/g' \
+        | LC_ALL=C sed -E 's/^-+|-+$//g' \
+        | cut -c1-64)
+      [ -z "$FS_SLUG" ] && FS_SLUG="meta-ad-$(date +%s)"
+
+      DATE=$(date +%Y-%m-%d)
+
+      cat > "$ARTIFACTS_DIR/slug.json" <<EOF
+      {
+        "composition_id": "$COMP_ID",
+        "fs_slug": "$FS_SLUG",
+        "date": "$DATE",
+        "archive_dirname": "$DATE-$FS_SLUG"
+      }
+      EOF
+
+      echo "composition_id=$COMP_ID"
+      echo "fs_slug=$FS_SLUG"
+      echo "archive_dirname=$DATE-$FS_SLUG"
+    depends_on: [parse-script]
+    timeout: 10000
+
+  - id: ensure-remotion-project
+    bash: |
+      set -euo pipefail
+
+      HAS_REMOTION=false
+      if [ -f package.json ] && [ -f src/Root.tsx ]; then
+        if jq -e '.dependencies.remotion // .devDependencies.remotion' package.json > /dev/null 2>&1; then
+          HAS_REMOTION=true
+        fi
+      fi
+
+      if [ "$HAS_REMOTION" = "true" ]; then
+        echo "Remotion project already present at $(pwd) — skipping scaffold."
+      else
+        echo "No Remotion project detected — scaffolding into repo root."
+        TMP=$(mktemp -d)
+        trap 'rm -rf "$TMP"' EXIT
+        npx --yes create-video@latest --yes --blank --no-tailwind "$TMP/_project"
+        rm -rf "$TMP/_project/.git"
+        rm -f  "$TMP/_project/.gitignore"
+        [ -f README.md ] && rm -f "$TMP/_project/README.md"
+        cp -R "$TMP/_project/." .
+
+        cat > src/Root.tsx <<'TSX'
+      // Stable root — do not edit. Compositions are registered through
+      // src/compositions.gen.ts, which is regenerated each workflow run
+      // by the `regenerate-registry` node.
+      import React from 'react';
+      import { Composition } from 'remotion';
+      import entries from './compositions.gen';
+
+      export const RemotionRoot: React.FC = () => (
+        <>
+          {entries.map((e) => (
+            <Composition
+              key={e.id}
+              id={e.id}
+              component={e.component}
+              width={e.width}
+              height={e.height}
+              fps={e.fps}
+              durationInFrames={e.durationInFrames}
+              defaultProps={e.defaultProps}
+              calculateMetadata={e.calculateMetadata}
+            />
+          ))}
+        </>
+      );
+      TSX
+
+        cat > src/compositions.gen.ts <<'TSX'
+      // GENERATED — do not edit. Regenerated by the `regenerate-registry`
+      // workflow node by scanning src/<Slug>/index.ts files.
+      import type React from 'react';
+
+      type CompMeta = {
+        id: string;
+        component: React.ComponentType<any>;
+        width: number;
+        height: number;
+        fps: number;
+        durationInFrames: number;
+        defaultProps?: Record<string, unknown>;
+        calculateMetadata?: any;
+      };
+
+      const entries: CompMeta[] = [];
+      export default entries;
+      TSX
+      fi
+
+      if command -v pnpm >/dev/null 2>&1; then
+        pnpm install --prefer-offline
+      elif command -v bun >/dev/null 2>&1; then
+        bun install
+      else
+        npm install --no-audit --no-fund
+      fi
+
+      echo "PROJECT_ROOT=$(pwd)"
+    depends_on: [check-skill]
+    timeout: 600000
+
+  # ── Layer 2: Plan (vertical / RTL / persuasion / delegation-aware) ─
+
+  - id: plan-video
+    prompt: |
+      You are planning a vertical Meta/Facebook ad video from a finished
+      Tunisian Darija ad script. The script is sacred — you do not rewrite
+      its words. Your job is to segment it into scenes + reveal beats,
+      classify which scenes Remotion can render well vs which need
+      delegation to an AI video tool, and emit calibrated timing.
+
+      ── Inputs (already on disk) ────────────────────────────────────────
+
+      Source metadata: $parse-script.output
+      Slug:            $derive-slug.output
+
+      Read these files before planning:
+      - `$ARTIFACTS_DIR/article.json` — language, aspect_ratio, width, height
+      - `$ARTIFACTS_DIR/article-body.md` — the script verbatim
+      - `$ARTIFACTS_DIR/slug.json` — composition_id, fs_slug
+      - `.archon/brand.yaml` if present — caption_register, accent colors
+
+      ── Hard rules ──────────────────────────────────────────────────────
+
+      1. **Words are sacred.** Every caption text comes verbatim from the
+         script. You may break long sentences across multiple captions, but
+         you may NOT rephrase, summarize, translate, or "tighten" the
+         script's words. If the script says "ما تمشيش تشري pointeuse بـ3000
+         دينار", that's the caption.
+
+      2. **No CTA invention.** If the script ends without a CTA, the video
+         ends without a CTA. Never fabricate one.
+
+      3. **Delegation moderation** (HARD; QA enforces these):
+         - At least 50% of scenes MUST have `kind: remotion`
+         - The CTA scene MUST have `kind: remotion`
+         - The comparison-panel scene (where the script lists rivals like
+           "Pointeuse biométrique تعمل هذي؟ لا. أبليكاسيون إكسل؟ لا. كنّش؟ لا.")
+           MUST have `kind: remotion`
+         - The hook scene (scene 1) MAY be `kind: ai-clip` or `kind: hybrid`
+           if the script's opening line is cinematic / future-pacing
+           (e.g. AD-COPY-3's "تخيّل الصباح. تحل التيليفون.")
+         - Body scenes default to `kind: remotion`. Use `kind: hybrid`
+           (AI-clip background + Remotion caption overlay) ONLY when the
+           emotional weight of the scene benefits from photoreal
+           cinematography (e.g. a frustrated business owner scene).
+         - `kind: ai-clip` (no caption overlay) is rare — use only when
+           the visual carries the entire scene without supporting copy.
+
+      4. **Vertical 9:16 framing assumed unless `article.json.aspect_ratio`
+         is `4:5` or `1:1`.** Width × Height come from article.json.
+
+      5. **Safe areas**: top 12% and bottom 18% are reserved for Meta UI
+         overlays. All persuasion-critical content (hook headline, comparison
+         panel, CTA, captions) must visually occupy the middle 70%. Note
+         this in the plan; the builder enforces it.
+
+      6. **Captions are spoken by the user later.** Per-caption duration
+         must accommodate BOTH muted Arabic reading AND post-record voice
+         delivery. Use the formula below.
+
+      ── Per-caption duration formula ────────────────────────────────────
+
+      ```
+      arabic_word_count = number of standalone Arabic words in the caption
+      loanword_count    = number of French/English loanwords (Latin script)
+
+      caption_seconds = max(
+        arabic_word_count * 0.45 + loanword_count * 0.25,
+        min_floor
+      )
+      where min_floor = 0.9 if total_words <= 2 else 1.5
+
+      breath_pause_after = 0.4   (added between consecutive captions)
+      tail_buffer_per_scene = 0.5  (added once at the end of each scene)
+      ```
+
+      Worked examples (apply this calibration):
+      - "لا." (1 word) → max(1*0.45, 0.9) = 0.9s on-screen + 0.4s breath
+      - "ما تمشيش تشري pointeuse بـ3000 دينار" (5 Arabic + 1 loanword)
+        → max(5*0.45 + 1*0.25, 1.5) = max(2.5, 1.5) = 2.5s + 0.4s breath
+      - "تخيّل الصباح. تحل التيليفون." (4 Arabic words)
+        → max(4*0.45, 1.5) = 1.8s + 0.4s breath
+      - "Pointeuse biométrique تعمل هذي؟" (1 Arabic + 2 loanwords, punch)
+        → max(1*0.45 + 2*0.25, 0.9) = max(0.95, 0.9) = 0.95s, but punches
+        get extra weight: bump to min 1.2s for is_punch=true
+
+      For `is_punch: true` captions, use `min_floor = 1.2s` regardless
+      of word count (a punch needs to land).
+
+      ── Caption segmentation strategy ───────────────────────────────────
+
+      - **Primary unit: rhetorical beat.** A beat is one persuasion micro-move:
+        a question, a claim, a punch, a list item, a transition phrase.
+      - **Hard cap per caption: 8 words OR 50 characters**, whichever comes
+        first. Break longer sentences into multiple captions at natural
+        comma / clause boundaries.
+      - The opening 60-word AD-COPY1 hook is FOUR distinct beats:
+          (1) "إذا عندك خدامة وتحب تعرف الحقيقة؟"  — warning
+          (2) "ما تمشيش تشري pointeuse بـ3000 دينار."  — claim
+          (3) "فمّا حاجة أحسن، 100% تونسية، بعشر الفلوس."  — promise
+          (4) "أما أقف، قبل ما نحكيلك حكاية، جاوبني على 3 أسئلة."  — pivot
+        Each gets its own caption. Each gets its own duration.
+
+      - **Mark `is_punch: true`** for captions that are short, sharp,
+        rhythmic, or rhetorical-question payoffs ("لا.", "هذا مش حلم.",
+        "هذى Xshift."). Punches earn pop-entrance and longer minimum
+        on-screen time.
+
+      ── Mode = script (always) ──────────────────────────────────────────
+
+      Read `article-body.md`. Identify the script's persuasion structure.
+      Common structure for direct-response ads:
+
+      - Scene 1: HOOK (warning, qualifying questions, future-pacing,
+        problem agitation, or surprising stat)
+      - Scenes 2-3: PROBLEM AGITATION (the painful status quo)
+      - Scenes 3-4: MECHANISM (how the product works — 1-2 features only)
+      - Scene 5: COMPARISON (rival options dismissed)
+      - Scene 6: OFFER (what you get, no subscription, etc.)
+      - Scene 7: RISK REVERSAL (guarantee, refund, pay-on-delivery)
+      - Scene 8: CTA (button below, delivery time)
+
+      Adjust to fit the actual script. 5-8 scenes total. Each scene's
+      `rhetorical_role` field uses one of:
+      `hook | problem | mechanism | comparison | offer | risk-reversal | cta`
+
+      ── Animation vocabulary (per scene) ────────────────────────────────
+
+      Pick 1-2 techniques per scene and name them in the plan's
+      `Animation:` field:
+
+      - `kinetic-caption-typewriter`  — string-sliced reveal of one beat
+      - `kinetic-caption-word-cluster` — 2-3 word chunks fade-up staggered
+      - `punch-pop`                    — scale 0.6→1.05→1.0 spring (for is_punch)
+      - `benefit-card-stagger`         — vertical card stack, 0.15s offsets
+      - `comparison-row-cascade`       — comparison rows enter top-to-bottom
+                                         with stagger; winner row pops
+      - `cta-pulse`                    — scale-pulse loop on CTA button
+      - `hook-punch-zoom`              — pattern-interrupt zoom + flash
+                                         (auto-applied to scene 1 if
+                                         kind: remotion or hybrid)
+      - `phone-frame-tilt`             — 3D phone bezel tilts in
+      - `guarantee-ribbon-slide`       — green ribbon slides from right
+      - `clip-overlay-kenburns`        — for hybrid scenes, Ken Burns over
+                                         the AI clip background
+      - `diagram-reveal`               — visual-diagrams comparison panel
+
+      ── Diagram / comparison decision ───────────────────────────────────
+
+      If the script has a comparison passage (rivals dismissed in
+      sequence), use the `visual-diagrams` `ComparisonDiagram` component
+      OR a vendored `<ComparisonRow>` stack — both work. Mark the scene
+      with `Diagram: comparison`. Note the kind MUST be `remotion`.
+
+      ── Artifacts to write (FOUR required) ──────────────────────────────
+
+      1. `$ARTIFACTS_DIR/video-plan.md` — structured plan (schema below)
+
+      2. `$ARTIFACTS_DIR/captions.json` — on-screen text source of truth:
+
+             {
+               "composition_id": "<from slug.json>",
+               "fps": 30,
+               "language": "ar-TN",
+               "scenes": [
+                 {
+                   "id": "scene1",
+                   "rhetorical_role": "hook",
+                   "duration_s": 4.2,
+                   "beats": [
+                     {
+                       "text": "تخيّل الصباح. تحل التيليفون.",
+                       "start_s": 0.3,
+                       "end_s": 2.4,
+                       "is_punch": false,
+                       "loanwords": []
+                     },
+                     {
+                       "text": "ترى كل خدام، وينو، وقتاش دخل، وقتاش خرج، ومنين pointa",
+                       "start_s": 2.5,
+                       "end_s": 4.0,
+                       "is_punch": false,
+                       "loanwords": ["pointa"]
+                     }
+                   ]
+                 }
+               ]
+             }
+
+         Beat timing rules:
+         - First beat starts at `start_s = 0.3` (a quarter-second lead-in)
+         - `(end_s - start_s)` ≥ caption_seconds (per the formula)
+         - Gap between beats ≥ 0.4s (breath_pause_after)
+         - Last beat's `end_s` + 0.5s tail = scene's total `duration_s`
+
+      3. `$ARTIFACTS_DIR/durations.json` — timing source of truth:
+
+             {
+               "composition_id": "<from slug.json>",
+               "fps": 30,
+               "scenes": [
+                 { "id": "scene1", "duration_s": 4.2, "duration_frames": 126 },
+                 { "id": "scene2", "duration_s": 5.0, "duration_frames": 150 }
+               ],
+               "total_duration_s": 35.4,
+               "total_duration_frames": 1062
+             }
+
+         Sum scene durations EXACTLY as `sum(beats[end_s] - beats[start_s] +
+         breath gaps + tail_buffer)`. Round `duration_frames` to nearest
+         integer (`Math.round(duration_s * 30)`).
+
+      4. `$ARTIFACTS_DIR/delegation-plan.json` — per-scene delegation:
+
+             {
+               "composition_id": "<from slug.json>",
+               "aspect_ratio": "9:16",
+               "width": 1080,
+               "height": 1920,
+               "scenes": [
+                 {
+                   "id": "scene1",
+                   "kind": "ai-clip",
+                   "rhetorical_role": "hook",
+                   "duration_s": 4.2,
+                   "expected_path": "public/clips/<CompId>/scene1.mp4",
+                   "reason": "<why Remotion can't produce this — be specific>",
+                   "start_frame_prompt": "<tool-agnostic prose, no MJ params>",
+                   "end_frame_prompt": "<tool-agnostic prose>",
+                   "motion_prompt": "<tool-agnostic prose, mention duration & framing>"
+                 },
+                 {
+                   "id": "scene2",
+                   "kind": "remotion",
+                   "rhetorical_role": "problem",
+                   "duration_s": 5.0
+                 }
+               ]
+             }
+
+         For `kind: remotion`: only emit `id`, `kind`, `rhetorical_role`,
+         `duration_s`. Don't emit prompts.
+
+         For `kind: ai-clip` or `kind: hybrid`: emit ALL fields including
+         the three prompts. Prompts must be:
+         - **Tool-agnostic prose** — no Midjourney `--ar` params, no Veo
+           shortcuts, no Kling-specific markers. Generic descriptive text
+           the user can paste into any image / video tool.
+         - **Aspect-ratio-aware** — every prompt mentions "vertical 9:16
+           framing" (or 4:5 / 1:1) so the user generates correctly-shaped
+           output.
+         - **Duration-aware** — the motion prompt mentions the target
+           duration in seconds (e.g. "Slow 4-second push-in").
+
+      ── video-plan.md schema ────────────────────────────────────────────
+
+          # Video Plan
+
+          **Source script:** <source_path>
+          **Composition ID:** <composition_id>  (<width>×<height> @ 30fps)
+          **Aspect ratio:** <9:16 | 4:5 | 1:1>
+          **Total duration:** <N>s
+          **Scene count:** <N>  (remotion=<X>, ai-clip=<Y>, hybrid=<Z>)
+          **Has comparison panel:** yes | no
+          **Has CTA:** yes | no
+
+          ## scene1 — HOOK — <short name> — <kind: remotion|ai-clip|hybrid>
+          - **Duration:** <N.N>s
+          - **Rhetorical role:** hook
+          - **Captions (verbatim):**
+            - "<beat 1 text>"  (<N.N>s, is_punch=<bool>, loanwords=[<list>])
+            - "<beat 2 text>"  (...)
+          - **Animation:** <1-2 techniques from the vocabulary>
+          - **Visuals:** <specific elements>
+          - **Persuasion notes:** <why this scene works — Schwartz/Hormozi
+            framing if relevant>
+          - **Delegation reason** (if kind != remotion): <one sentence>
+          - **Transition out:** fade | slide-left | slide-right | slide-up |
+            slide-down | wipe | clock-wipe | flip | hard-cut
+
+          ## scene2 — ...
+
+      ── Final output ────────────────────────────────────────────────────
+
+      After writing all four artifacts, emit your final message as a JSON
+      object matching the output schema below. Downstream nodes read
+      `composition_id`, `total_duration_s`, scene counts.
+    output_format:
+      type: object
+      properties:
+        composition_id:
+          type: string
+        total_duration_s:
+          type: number
+        scene_count:
+          type: number
+        remotion_scene_count:
+          type: number
+        ai_clip_scene_count:
+          type: number
+        hybrid_scene_count:
+          type: number
+        has_comparison:
+          type: boolean
+        has_cta:
+          type: boolean
+      required: [composition_id, total_duration_s, scene_count]
+    depends_on: [parse-script, ensure-remotion-project, derive-slug]
+    idle_timeout: 600000
+
+  # ── Layer 3: Audio layers (parallel, both opt-in, no voice) ────────
+
+  - id: generate-sfx
+    bash: |
+      set -euo pipefail
+      uv run .archon/scripts/generate_sfx.py "$ARTIFACTS_DIR"
+    depends_on: [plan-video]
+    timeout: 600000
+
+  - id: generate-music
+    bash: |
+      set -euo pipefail
+      uv run .archon/scripts/generate_music.py "$ARTIFACTS_DIR"
+    depends_on: [plan-video]
+    timeout: 600000
+
+  # ── Layer 4: Clip-readiness gate (halts cleanly if AI clips missing) ─
+  # Sized to live AFTER plan-video and the audio nodes so plan-video is
+  # cached before the gate evaluates. On resume (same workflow_run_id)
+  # the gate re-checks the filesystem and continues if all clips present.
+
+  - id: clip-readiness-check
+    bash: |
+      set -euo pipefail
+
+      DELEGATION="$ARTIFACTS_DIR/delegation-plan.json"
+      if [ ! -f "$DELEGATION" ]; then
+        echo "FATAL: delegation-plan.json missing — plan-video should have produced it." >&2
+        exit 1
+      fi
+
+      COMP_ID=$(jq -r '.composition_id' "$ARTIFACTS_DIR/slug.json")
+      ARCHIVE_DIRNAME=$(jq -r '.archive_dirname' "$ARTIFACTS_DIR/slug.json")
+
+      MISSING=()
+      while IFS=$'\t' read -r SID KIND EXPECTED; do
+        if [ "$KIND" = "remotion" ]; then
+          continue
+        fi
+        if [ ! -f "$EXPECTED" ]; then
+          MISSING+=("$SID|$KIND|$EXPECTED")
+        fi
+      done < <(jq -r '.scenes[] | [.id, .kind, .expected_path] | @tsv' "$DELEGATION")
+
+      if [ ${#MISSING[@]} -eq 0 ]; then
+        echo "All delegated AI clips present — proceeding to build."
+        exit 0
+      fi
+
+      DEST="videos/$ARCHIVE_DIRNAME"
+      mkdir -p "$DEST" "public/clips/$COMP_ID"
+
+      NEEDED="$DEST/CLIPS-NEEDED.md"
+      ARGS_LINE="$ARGUMENTS"
+      RUN_ID="${WORKFLOW_RUN_ID:-<run-id>}"
+
+      {
+        echo "# AI clips needed for: $COMP_ID"
+        echo ""
+        echo "This workflow has halted at \`clip-readiness-check\` because some"
+        echo "scenes are flagged for AI-video delegation and the corresponding"
+        echo "clips are not yet on disk."
+        echo ""
+        echo "## Resume the workflow"
+        echo ""
+        echo "1. Generate each missing clip below using your AI video tool of"
+        echo "   choice (Veo, Kling, Sora, Runway, etc.) using the prompts as-is."
+        echo "2. Save each result to the exact path shown."
+        echo "3. Re-run with the **same** \`workflow_run_id\` — Archon resumes"
+        echo "   from this gate (caches plan-video + audio nodes):"
+        echo ""
+        echo "   \`\`\`"
+        echo "   archon workflow run script-to-meta-ad --no-worktree \"$ARGS_LINE\" --run-id $RUN_ID"
+        echo "   \`\`\`"
+        echo ""
+        echo "## Missing clips"
+        echo ""
+
+        for ENTRY in "${MISSING[@]}"; do
+          IFS='|' read -r SID KIND EXPECTED <<< "$ENTRY"
+          DURATION=$(jq -r ".scenes[] | select(.id==\"$SID\") | .duration_s" "$DELEGATION")
+          AR=$(jq -r ".aspect_ratio" "$DELEGATION")
+          REASON=$(jq -r ".scenes[] | select(.id==\"$SID\") | .reason" "$DELEGATION")
+          START_F=$(jq -r ".scenes[] | select(.id==\"$SID\") | .start_frame_prompt" "$DELEGATION")
+          END_F=$(jq -r ".scenes[] | select(.id==\"$SID\") | .end_frame_prompt" "$DELEGATION")
+          MOTION=$(jq -r ".scenes[] | select(.id==\"$SID\") | .motion_prompt" "$DELEGATION")
+
+          echo "### $SID — kind: \`$KIND\` — duration: ${DURATION}s — aspect: $AR"
+          echo ""
+          echo "**Save to:** \`$EXPECTED\`"
+          echo ""
+          echo "**Why delegated:** $REASON"
+          echo ""
+          echo "**Start frame prompt** (paste into image gen — Flux / MJ / Imagen / etc.):"
+          echo ""
+          echo "> $START_F"
+          echo ""
+          echo "**End frame prompt:**"
+          echo ""
+          echo "> $END_F"
+          echo ""
+          echo "**Motion prompt** (paste into video gen — Veo / Kling / Sora — along with start+end frames if the tool accepts them):"
+          echo ""
+          echo "> $MOTION"
+          echo ""
+          echo "---"
+          echo ""
+        done
+      } > "$NEEDED"
+
+      cat "$NEEDED"
+      echo ""
+      echo "FATAL: ${#MISSING[@]} delegated clip(s) missing. Generate them, save to public/clips/$COMP_ID/, then resume." >&2
+      exit 2
+    depends_on: [plan-video, generate-sfx, generate-music]
+    trigger_rule: all_success
+    timeout: 30000
+
+  # ── Layer 5: Build composition ─────────────────────────────────────
+
+  - id: build-composition
+    command: meta-ad-build-composition
+    depends_on: [clip-readiness-check]
+    trigger_rule: all_success
+    context: fresh
+    skills:
+      - remotion-best-practices
+      - visual-diagrams
+    idle_timeout: 1200000
+
+  # ── Layer 5.5: Regenerate compositions registry ────────────────────
+
+  - id: regenerate-registry
+    bash: |
+      set -euo pipefail
+
+      OUT="src/compositions.gen.ts"
+      TMP="$(mktemp)"
+
+      echo "// GENERATED — do not edit. Regenerated by the \`regenerate-registry\`" > "$TMP"
+      echo "// workflow node by scanning src/<Slug>/index.ts files." >> "$TMP"
+      echo "import type React from 'react';" >> "$TMP"
+      echo "" >> "$TMP"
+      echo "type CompMeta = {" >> "$TMP"
+      echo "  id: string;" >> "$TMP"
+      echo "  component: React.ComponentType<any>;" >> "$TMP"
+      echo "  width: number;" >> "$TMP"
+      echo "  height: number;" >> "$TMP"
+      echo "  fps: number;" >> "$TMP"
+      echo "  durationInFrames: number;" >> "$TMP"
+      echo "  defaultProps?: Record<string, unknown>;" >> "$TMP"
+      echo "  calculateMetadata?: any;" >> "$TMP"
+      echo "};" >> "$TMP"
+      echo "" >> "$TMP"
+
+      NAMES=()
+      for d in src/*/; do
+        name=$(basename "$d")
+        case "$name" in
+          shared|components|lib|utils|helpers) continue ;;
+        esac
+        if [ -f "$d/index.ts" ] || [ -f "$d/index.tsx" ]; then
+          NAMES+=("$name")
+          local_name=$(printf '%s' "$name" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C sed -E 's/[^a-z0-9]//g')
+          [ -z "$local_name" ] && local_name="comp$(printf '%s' "$name" | LC_ALL=C sed -E 's/[^a-zA-Z0-9]//g')"
+          echo "import ${local_name}_meta from './${name}';" >> "$TMP"
+        fi
+      done
+
+      echo "" >> "$TMP"
+      echo "const entries: CompMeta[] = [" >> "$TMP"
+      for name in "${NAMES[@]}"; do
+        local_name=$(printf '%s' "$name" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C sed -E 's/[^a-z0-9]//g')
+        [ -z "$local_name" ] && local_name="comp$(printf '%s' "$name" | LC_ALL=C sed -E 's/[^a-zA-Z0-9]//g')"
+        echo "  ${local_name}_meta," >> "$TMP"
+      done
+      echo "];" >> "$TMP"
+      echo "" >> "$TMP"
+      echo "export default entries;" >> "$TMP"
+
+      mv "$TMP" "$OUT"
+      echo "Registered compositions: ${#NAMES[@]}"
+      for n in "${NAMES[@]}"; do echo "  - $n"; done
+    depends_on: [build-composition]
+    timeout: 15000
+
+  # ── Layer 6: QA review (read-only intent) ──────────────────────────
+
+  - id: qa-review
+    prompt: |
+      You are a Remotion code reviewer for a vertical Meta/Facebook ad
+      composition. **Review only — do NOT edit source files under
+      `./src/<CompId>/` in the repo.** You may Write review artifacts to
+      `$ARTIFACTS_DIR/qa-findings.md` and run Bash for compile checks.
+      Treat the source tree as read-only.
+
+      Project root: repo root (cwd)
+      Plan:        `$ARTIFACTS_DIR/video-plan.md`
+      Slug:        `$ARTIFACTS_DIR/slug.json` — composition_id + fs_slug
+      Article:     `$ARTIFACTS_DIR/article.json` — aspect_ratio, width, height
+      Captions:    `$ARTIFACTS_DIR/captions.json`
+      Durations:   `$ARTIFACTS_DIR/durations.json`
+      Delegation:  `$ARTIFACTS_DIR/delegation-plan.json`
+      Music:       `$ARTIFACTS_DIR/audio/music-manifest.json`  (may be absent)
+      SFX:         `$ARTIFACTS_DIR/audio/sfx-manifest.json`    (may be absent)
+      Brand:       `.archon/brand.yaml`                         (may be absent)
+
+      Detect flags:
+
+          [ -f "$ARTIFACTS_DIR/audio/music-manifest.json" ] && MUSIC=true || MUSIC=false
+          [ -f "$ARTIFACTS_DIR/audio/sfx-manifest.json"   ] && SFX=true   || SFX=false
+          AR=$(jq -r '.aspect_ratio' "$ARTIFACTS_DIR/article.json")
+          WIDTH=$(jq -r '.width' "$ARTIFACTS_DIR/article.json")
+          HEIGHT=$(jq -r '.height' "$ARTIFACTS_DIR/article.json")
+          REM_COUNT=$(jq '[.scenes[] | select(.kind=="remotion")] | length' "$ARTIFACTS_DIR/delegation-plan.json")
+          TOTAL=$(jq '.scenes | length' "$ARTIFACTS_DIR/delegation-plan.json")
+
+      Base checks (always):
+      1. **Compiles.** `npx --yes tsc --noEmit` from repo root.
+      2. **Registered.** Composition ID from slug.json appears in
+         `src/compositions.gen.ts` (regenerated right before QA).
+         Verify `src/<CompId>/index.ts` default-exports valid composition meta
+         with `width`, `height` matching `article.json`.
+      3. **Plan alignment.** Scene IDs in the composition match captions.json.
+         Per-scene `<TransitionSeries.Sequence durationInFrames={...}>`
+         matches `durations.json` scene `duration_frames` (within ±2 frames
+         to allow for transition overlap math).
+      4. **Repo hygiene.** New composition isolated under `src/<CompId>/`.
+         Did NOT edit any other composition's files. Did NOT modify
+         `src/Root.tsx` or `src/compositions.gen.ts`. Touching
+         `src/shared/components/` is allowed only for missing primitives.
+      5. **Remotion best practices.** Use the `remotion-best-practices` skill.
+
+      Vertical / Meta-ad-specific checks (always):
+
+      6a. **Composition dimensions match article.json.** `width=$WIDTH,
+          height=$HEIGHT` in the composition meta and in `calculateMetadata`.
+          Mismatch is HIGH-severity.
+      6b. **Safe-area compliance.** Persuasion-critical content (hook
+          headline, comparison panel, CTA, captions) is positioned within
+          the middle 70% of the canvas (top 12% and bottom 18% reserved
+          for Meta UI). Look for absolute-positioned text/buttons whose
+          top<12% or top+height>82%. HIGH-severity per violation.
+      6c. **Hook 1.5–3s grip test.** Scene 1 must have a visual hook within
+          the first 30 frames (1s). For `kind: remotion` or `kind: hybrid`:
+          look for `<HookPunch>` wrapper or equivalent zoom/scale entrance
+          on first frame. For `kind: ai-clip`: the AI clip itself carries
+          the hook (no Remotion check needed). Hard-cut to a static title
+          card with no entrance motion = HIGH-severity.
+
+      Arabic / RTL checks (always):
+
+      6d. **`direction: rtl` + `unicodeBidi: 'plaintext'`** on every
+          Arabic-containing text node. The `arabicTextStyle()` helper from
+          `src/shared/components/arabic.ts` is preferred — flag any inline
+          style that omits these. HIGH-severity per violation.
+      6e. **Arabic font loaded.** `@remotion/google-fonts/Cairo` (or the
+          brand-specified family) is imported and `loadFont(...)` is called
+          with `subsets: [..., 'arabic']`. Missing arabic subset = HIGH.
+      6f. **Loanwords visually distinguished.** Any beat in `captions.json`
+          with non-empty `loanwords[]` should produce caption rendering
+          that wraps the loanword in a font-weight-500 span (vs Arabic
+          body at weight 700). Flag wholesale missing distinction as MED.
+
+      Caption / timing checks (always):
+
+      6g. **Caption durations honor planner output.** Each `<KineticCaption>`
+          renders the beats from captions.json with their start_s/end_s
+          intact. Builder must NOT shorten any beat. If a caption renders
+          for less than its (end_s - start_s) span = HIGH (planner contract
+          violation).
+      6h. **Scene durations match durations.json.** No discrepancy beyond
+          ±2 frames. HIGH if violated.
+      6i. **No re-derived timing in calculateMetadata.** The composition's
+          `calculateMetadata.ts` reads from durations.json, NOT from any
+          audio manifest. Probing audio for duration in this workflow is
+          a CRITICAL bug.
+
+      Animation quality checks (always — same as existing workflow):
+
+      6j. **Transitions wired via `@remotion/transitions`.** Any plan
+          `Transition out:` other than `hard-cut` must use
+          `<TransitionSeries.Transition>` with the matching preset.
+          Hand-animated opacity fade between sequences = HIGH.
+      6k. **No per-character opacity.** Typewriter/reveal must use string
+          slicing. Per-character opacity = HIGH.
+      6l. **Named Bézier easing** on `interpolate()` (or `Easing.out(...)`
+          / spring). `Easing.linear` on non-loop animations = LOW per
+          occurrence.
+      6m. **`premountFor` on every Sequence.** Missing on any = LOW;
+          systematic = MED.
+      6n. **Seconds × fps.** No raw frame literals > 30 except values
+          pulled from manifests. LOW per occurrence, MED if systematic.
+      6o. **`@remotion/google-fonts`.** All non-system fonts loaded via
+          the package with `weights` + `subsets`. Raw `fontFamily` strings
+          without `loadFont` = MED.
+      6p. **Composed-progress.** Multi-property animations on one beat
+          derive from a single normalized progress variable. Duplicated
+          full `interpolate(frame, ...)` calls for the same window = LOW.
+          `[1.0, 1.0]` no-op ranges = HIGH.
+
+      Delegation-balance checks (always):
+
+      7a. **At least 50% remotion.** `REM_COUNT * 2 >= TOTAL` MUST hold.
+          MED-severity if violated (planner regression — flag in iterate
+          report rather than fix in iterate).
+      7b. **CTA scene is `kind: remotion`.** The scene whose
+          `rhetorical_role` is `cta` MUST have `kind: remotion`. HIGH if
+          violated (planner regression).
+      7c. **Comparison scene is `kind: remotion`.** Any scene whose plan
+          flags a comparison panel MUST have `kind: remotion`. HIGH if
+          violated (planner regression).
+      7d. **Hybrid scenes have a clip-overlay structure.** Any scene with
+          `kind: hybrid` in delegation-plan must wrap content in
+          `<ClipOverlayBackground>` (or equivalent `<OffthreadVideo>` +
+          scrim). Bare `<OffthreadVideo>` without scrim under a caption =
+          MED-severity (legibility risk).
+      7e. **Ai-clip scenes don't add Remotion captions.** `kind: ai-clip`
+          scenes should let the clip carry the scene. If a `kind: ai-clip`
+          scene has a `<KineticCaption>` overlay, it's likely a
+          mis-classification — should have been `kind: hybrid`. MED.
+
+      Music-mode checks (when MUSIC=true):
+
+      - 8a. A single `<Audio>` reads `music-manifest.path` via `staticFile()`.
+      - 8b. Music audio has `volume` set (manifest default ~0.2). Note: with
+            no voice in this workflow, ducking isn't strictly required, but
+            volume ≥ 0.5 is jarring on muted Facebook autoplay — flag MED if
+            unset OR ≥ 0.5.
+      - 8c. Music audio is placed at composition level so it spans all scenes.
+
+      SFX-mode checks (when SFX=true):
+
+      - 9a. Intro whoosh at frame 0, outro stinger at composition end,
+            transition ticks at scene boundaries — each wired with a Sequence
+            offset matching the manifest cue.
+      - 9b. No SFX mid-scene unless the plan explicitly required it.
+
+      Voice-mode checks: **NOT APPLICABLE in this workflow.** If you find
+      voice-related code (calls to `getAudioDuration`, voice-manifest
+      imports, voice `<Audio>` elements), flag CRITICAL — the workflow
+      doesn't synthesize voice and the composition must be silent (with
+      optional SFX/music).
+
+      Write findings to `$ARTIFACTS_DIR/qa-findings.md`, one section per
+      issue, prefixed `CRITICAL` | `HIGH` | `MED` | `LOW`.
+
+      Verdict:
+      - `pass`            — zero CRITICAL and zero HIGH issues
+      - `needs-iteration` — at least one CRITICAL or HIGH issue
+
+      Your final message must be the JSON verdict.
+    depends_on: [regenerate-registry]
+    context: fresh
+    skills:
+      - remotion-best-practices
+      - visual-diagrams
+    output_format:
+      type: object
+      properties:
+        verdict:
+          type: string
+          enum: [pass, needs-iteration]
+        modes:
+          type: object
+          properties:
+            music:
+              type: string
+              enum: ["true", "false"]
+            sfx:
+              type: string
+              enum: ["true", "false"]
+            aspect_ratio:
+              type: string
+            remotion_count:
+              type: number
+            delegated_count:
+              type: number
+        critical_count:
+          type: number
+        high_count:
+          type: number
+        med_count:
+          type: number
+        low_count:
+          type: number
+        summary:
+          type: string
+      required: [verdict, summary]
+
+  # ── Layer 7: Iterate (conditional) ─────────────────────────────────
+
+  - id: iterate
+    command: meta-ad-iterate
+    depends_on: [qa-review]
+    when: "$qa-review.output.verdict == 'needs-iteration'"
+    context: fresh
+    skills:
+      - remotion-best-practices
+      - visual-diagrams
+    idle_timeout: 900000
+
+  # ── Layer 8: Verify ────────────────────────────────────────────────
+
+  - id: verify
+    bash: |
+      set -euo pipefail
+      COMP_ID=$(jq -r '.composition_id' "$ARTIFACTS_DIR/slug.json")
+
+      echo "=== tsc --noEmit ==="
+      npx --yes tsc --noEmit
+
+      echo ""
+      echo "=== remotion compositions ==="
+      npx --yes remotion compositions
+
+      echo ""
+      echo "Composition ID for downstream render: $COMP_ID"
+    depends_on: [qa-review, iterate]
+    trigger_rule: none_failed_min_one_success
+    timeout: 180000
+
+  # ── Layer 9: Render + archive (with chapter markers) ───────────────
+
+  - id: archive-render
+    bash: |
+      set -euo pipefail
+
+      RENDER="${RENDER_ENABLED:-true}"
+      if [ "$RENDER" = "false" ] || [ "$RENDER" = "0" ]; then
+        echo "RENDER_ENABLED=$RENDER — skipping render + archive."
+        exit 0
+      fi
+
+      SLUG=$(jq -r '.fs_slug' "$ARTIFACTS_DIR/slug.json")
+      COMP_ID=$(jq -r '.composition_id' "$ARTIFACTS_DIR/slug.json")
+      ARCHIVE_DIRNAME=$(jq -r '.archive_dirname' "$ARTIFACTS_DIR/slug.json")
+
+      DEST="videos/$ARCHIVE_DIRNAME"
+      mkdir -p "$DEST"
+      mkdir -p out
+
+      echo "=== remotion render $COMP_ID ==="
+      npx --yes remotion render "$COMP_ID" "out/$SLUG.mp4"
+
+      # Build ffmetadata chapters from captions.json (one chapter per scene).
+      CHAPTERS_FILE="$ARTIFACTS_DIR/chapters.ffmetadata"
+      {
+        echo ";FFMETADATA1"
+        echo "title=$COMP_ID"
+        echo ""
+        # Compute cumulative start in milliseconds; ffmetadata expects integer ms.
+        jq -r '
+          [.scenes[]] as $s |
+          reduce range(0; ($s | length)) as $i (
+            {acc: 0, out: []};
+            . as $state |
+            ($s[$i].duration_s * 1000 | floor) as $dur_ms |
+            ($state.acc) as $start |
+            ($start + $dur_ms) as $end |
+            {
+              acc: $end,
+              out: ($state.out + [{
+                id: $s[$i].id,
+                role: $s[$i].rhetorical_role,
+                start_ms: $start,
+                end_ms: $end
+              }])
+            }
+          )
+          | .out[]
+          | "[CHAPTER]\nTIMEBASE=1/1000\nSTART=\(.start_ms)\nEND=\(.end_ms)\ntitle=\(.id) — \(.role)"
+        ' "$ARTIFACTS_DIR/captions.json"
+      } > "$CHAPTERS_FILE"
+
+      # Re-mux the rendered mp4 with chapter metadata.
+      ffmpeg -y -i "out/$SLUG.mp4" -i "$CHAPTERS_FILE" \
+        -map_metadata 1 -map_chapters 1 -codec copy \
+        "out/${SLUG}-chapters.mp4"
+
+      cp "out/${SLUG}-chapters.mp4" "$DEST/$SLUG.mp4"
+
+      # Copy logic artifacts alongside the mp4 for posterity.
+      for f in "$ARTIFACTS_DIR/video-plan.md" \
+               "$ARTIFACTS_DIR/captions.json" \
+               "$ARTIFACTS_DIR/durations.json" \
+               "$ARTIFACTS_DIR/delegation-plan.json" \
+               "$ARTIFACTS_DIR/qa-findings.md" \
+               "$ARTIFACTS_DIR/article.json" \
+               "$ARTIFACTS_DIR/article-body.md" \
+               "$ARTIFACTS_DIR/audio/music-manifest.json" \
+               "$ARTIFACTS_DIR/audio/sfx-manifest.json"; do
+        [ -f "$f" ] && cp "$f" "$DEST/" || true
+      done
+
+      INDEX="videos/index.md"
+      if [ ! -f "$INDEX" ]; then
+        printf '# Video archive\n\n| Date | Title | Mode | AR | Verdict | Folder |\n|---|---|---|---|---|---|\n' > "$INDEX"
+      fi
+      TITLE=$(jq -r '.title' "$ARTIFACTS_DIR/article.json")
+      AR=$(jq -r '.aspect_ratio' "$ARTIFACTS_DIR/article.json")
+      DATE=$(jq -r '.date' "$ARTIFACTS_DIR/slug.json")
+      VERDICT="$qa-review.output.verdict"
+      TITLE_SAFE=$(printf '%s' "$TITLE" | sed 's/|/\\|/g')
+      printf '| %s | %s | meta-ad | %s | %s | [%s](%s) |\n' \
+        "$DATE" "$TITLE_SAFE" "$AR" "$VERDICT" \
+        "$ARCHIVE_DIRNAME" "$ARCHIVE_DIRNAME" >> "$INDEX"
+
+      echo "Archived: $DEST"
+    depends_on: [verify]
+    timeout: 600000
+
+  # ── Layer 10: Receipt ──────────────────────────────────────────────
+
+  - id: summarize
+    prompt: |
+      Emit a short receipt under 200 words, plain text, no code fences, no
+      leading or trailing prose. Match this structure exactly:
+
+          Meta/Facebook ad
+          Source:    <$parse-script.output (source_path line)>
+          Subject:   <$plan-video.output.composition_id>
+          AR:        <aspect ratio from $parse-script.output>
+          Comp ID:   <composition_id from $derive-slug.output>
+          Duration:  <$plan-video.output.total_duration_s>s
+          Scenes:    total=<$plan-video.output.scene_count> remotion=<.remotion_scene_count> ai-clip=<.ai_clip_scene_count> hybrid=<.hybrid_scene_count>
+          Audio:     music=<$qa-review.output.modes.music> sfx=<$qa-review.output.modes.sfx>
+          Verdict:   <$qa-review.output.verdict>
+
+          Archive:   ./videos/<archive_dirname from $derive-slug.output>/
+          Source:    ./src/<composition_id>/
+          Preview:   npx remotion studio
+          Render:    npx remotion render <composition_id>
+
+          Voice-recording note:
+          The rendered mp4 has chapter markers per scene. Open it in your
+          editor of choice — chapters appear in the timeline. Record your
+          Darija voice over the silent track; captions are calibrated to
+          accommodate natural delivery pace.
+
+          QA summary:
+          <one-paragraph: $qa-review.output.summary>
+
+      Context substituted:
+      - Parse:        $parse-script.output
+      - Slug JSON:    $derive-slug.output
+      - Plan output:  $plan-video.output
+      - QA modes:     $qa-review.output.modes
+      - QA verdict:   $qa-review.output.verdict
+      - QA summary:   $qa-review.output.summary
+      - Archive stdout:
+      $archive-render.output
+    depends_on: [archive-render]
+    model: haiku
+    allowed_tools: []

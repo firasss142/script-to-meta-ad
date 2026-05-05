@@ -1,0 +1,68 @@
+# Optional brand customization for the `remotion-idea-to-video` workflow.
+#
+# To activate: copy this file to `.archon/brand.yaml` and edit. Missing keys
+# fall back to the neutral defaults documented below. Delete or omit the file
+# entirely to use the defaults without any brand overlay.
+
+name: "Your Brand"
+
+# ── Palette (all keys optional; values are CSS-valid colors) ──────────
+# Defaults resemble a dark tech-editorial look.
+colors:
+  bg: "#0B1120"            # composition background
+  primary: "#7C3AED"       # accents, highlights, progress elements
+  secondary: "#06B6D4"     # secondary accent / diagram connections
+  accent: "#F59E0B"        # call-out color for emphasis
+  text_primary: "#FFFFFF"  # main headlines + narration captions
+  text_muted: "#94A3B8"    # supporting text
+
+# ── Typography ────────────────────────────────────────────────────────
+# Single font family. The composition loads it via @remotion/google-fonts.
+# Default: "Inter".
+font_family: "Inter"
+
+# ── Arabic typography (used by `script-to-meta-ad` workflow) ──────────
+# Primary Arabic family loaded via @remotion/google-fonts. The composition
+# falls back through Tajawal → "Noto Sans Arabic" → system-ui if a glyph
+# is missing. French / English loanwords inside Arabic copy use the same
+# family at weight 500 (Arabic body uses 700) to visually distinguish
+# without italics — Arabic doesn't have a strong italic tradition and
+# italicizing loanwords mid-line looks off.
+arabic_font: "Cairo"
+
+# ── Direct-response accent palette (script-to-meta-ad) ────────────────
+# Used by the ComparisonRow / GuaranteeBadge / CTA primitives. Defaults
+# track Tailwind 600 reds and emerald greens — high-contrast, safe on
+# dark backgrounds.
+accent_red: "#DC2626"      # losing rows in comparisons, "no" markers
+accent_green: "#10B981"    # winning rows, ✓ marks, guarantee badges
+
+# ── Caption / voice register hint (script-to-meta-ad) ─────────────────
+# Free-text hint about the spoken/captioned register of the brand. The
+# planner does not rewrite the script — words are sacred — but this hint
+# influences animation choreography (informal-darija → punchier punches,
+# more whitespace; formal-msa → calmer pacing, longer linger times).
+caption_register: "informal-darija"
+
+# ── Default aspect ratio for ads (script-to-meta-ad) ──────────────────
+# 9:16 (1080×1920) for Reels/Stories — the primary FB ad placement.
+# Override per run via the workflow argument: `script <path> 4:5` or
+# `script <path> 1:1`. The CLI argument always wins over this default.
+default_aspect_ratio: "9:16"
+
+# ── Logo / watermark (both optional) ──────────────────────────────────
+# logo_url may be an absolute URL (fetched at scaffold) or a project-relative
+# path inside .archon/brand/. Set to null or omit to disable watermark.
+logo_url: null
+watermark_position: "bottom-right"   # top-left | top-right | bottom-left | bottom-right
+watermark_opacity: 0.65              # 0.0–1.0
+
+# ── Voice + music tone hints (consumed by plan + music prompt) ────────
+# Keep these short. They are appended to the planner and music prompts so
+# narration register and background music mood match your brand voice.
+voice_tone: "warm, friendly, techie, plainspoken"
+music_mood: "upbeat, understated tech, no drums, no vocals, cinematic bed"
+
+# ── SFX preferences ───────────────────────────────────────────────────
+# Tone words passed to the SFX generator when SFX is enabled. Keep generic.
+sfx_style: "modern, subtle, editorial, not cartoonish"

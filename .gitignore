@@ -1,0 +1,52 @@
+# Secrets / env
+.env
+.env.local
+.env.*.local
+
+# Archon runtime artifacts (may reference env vars, never commit)
+.archon/mcp/
+
+# Local Claude Code state (keep project skills, ignore per-user settings)
+.claude/settings.local.json
+.claude/settings.local.md
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build / output
+dist/
+build/
+out/
+*.log
+
+# Python bytecode (from .archon/scripts/*.py)
+__pycache__/
+*.pyc
+
+# Workflow video archive — per-run mp4s + artifacts under ./videos/<date>-<slug>/.
+# Remove this line if you want to track renders in git.
+videos/
+
+# Generated audio assets (music, SFX) and AI-generated video clips
+# accumulated by workflow runs. Large binaries tied to API calls or
+# manual generation — regenerate from runs if lost.
+# Remove these lines if you want to track the asset library in git.
+public/music/
+public/sfx/
+public/clips/
+
+# Remotion compositions accumulated by workflow runs. Each composition is
+# self-contained under src/<CompId>/ — committable if you want a permanent
+# library, ignorable if you treat each ad as ephemeral. Default: track them.
+# Uncomment to ignore:
+# src/[A-Z]*/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
