@@ -94,10 +94,13 @@ nodes:
     bash: |
       set -euo pipefail
 
-      ARGS="${ARGUMENTS:-}"
-      ARGS_TRIMMED=$(printf '%s' "$ARGS" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
+      # NOTE: Archon does TEXT substitution of $ARGUMENTS (not env-var export),
+      # so any shell parameter expansion like `"${ARGUMENTS:-}"` becomes invalid
+      # syntax after substitution and collapses to empty. We therefore consume
+      # $ARGUMENTS via printf — the substituted text becomes a literal argument.
+      ARGS_TRIMMED=$(printf '%s' "$ARGUMENTS" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
       if [ -z "$ARGS_TRIMMED" ]; then
-        echo "FATAL: $ARGUMENTS is empty — usage: 'script <path-to-md> [9:16|4:5|1:1]'" >&2
+        echo "FATAL: \$ARGUMENTS is empty — usage: 'script <path-to-md> [9:16|4:5|1:1]'" >&2
         exit 1
       fi
 
@@ -647,8 +650,10 @@ nodes:
       mkdir -p "$DEST" "public/clips/$COMP_ID"
 
       NEEDED="$DEST/CLIPS-NEEDED.md"
+      # $ARGUMENTS and $WORKFLOW_ID are text-substituted by archon before
+      # the bash runs — no env vars, no parameter expansion needed.
       ARGS_LINE="$ARGUMENTS"
-      RUN_ID="${WORKFLOW_RUN_ID:-<run-id>}"
+      RUN_ID="$WORKFLOW_ID"
 
       {
         echo "# AI clips needed for: $COMP_ID"
@@ -659,14 +664,16 @@ nodes:
         echo ""
         echo "## Resume the workflow"
         echo ""
+        echo "Run-id of the halted run: \`$RUN_ID\`"
+        echo ""
         echo "1. Generate each missing clip below using your AI video tool of"
         echo "   choice (Veo, Kling, Sora, Runway, etc.) using the prompts as-is."
         echo "2. Save each result to the exact path shown."
-        echo "3. Re-run with the **same** \`workflow_run_id\` — Archon resumes"
-        echo "   from this gate (caches plan-video + audio nodes):"
+        echo "3. Resume the workflow with \`--resume\` — Archon skips the cached"
+        echo "   plan-video + audio nodes and re-evaluates the clip-readiness gate:"
         echo ""
         echo "   \`\`\`"
-        echo "   archon workflow run script-to-meta-ad --no-worktree \"$ARGS_LINE\" --run-id $RUN_ID"
+        echo "   archon workflow run script-to-meta-ad --no-worktree --resume \"$ARGS_LINE\""
         echo "   \`\`\`"
         echo ""
         echo "## Missing clips"

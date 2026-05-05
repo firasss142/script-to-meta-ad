@@ -6,7 +6,7 @@ You are a coding agent helping a user set up or run this repo. **`README.md` is 
 
 `script-to-meta-ad` — an Archon workflow that turns a finished ad script (Tunisian Darija + French loanwords, or any RTL/LTR script) into a vertical Meta/Facebook ad creative. Muted-autoplay-native, kinetic captions, persuasion UI. **No TTS** — the user records their own voice in post over the silent render.
 
-Some scenes delegate to AI video tools (Veo / Kling / Sora / Runway) for cinematic moments Remotion can't produce well. The workflow halts cleanly at a `clip-readiness-check` gate when delegated clips are missing, writes copy-paste-ready prompts to `videos/<date>-<slug>/CLIPS-NEEDED.md`, and resumes from the gate when re-run with the same `--run-id`.
+Some scenes delegate to AI video tools (Veo / Kling / Sora / Runway) for cinematic moments Remotion can't produce well. The workflow halts cleanly at a `clip-readiness-check` gate when delegated clips are missing, writes copy-paste-ready prompts to `videos/<date>-<slug>/CLIPS-NEEDED.md`, and resumes from the gate when re-run with `--resume`.
 
 ## When the user asks you to set up the repo
 
@@ -27,12 +27,12 @@ Walk the user through:
 1. Open `CLIPS-NEEDED.md` and review the missing scenes
 2. For each scene, generate a clip with whatever AI video tool fits the shot (Veo for cinematic; Kling for image-to-video with start+end frames; Sora; Runway; etc. — the prompts are tool-agnostic prose)
 3. Save each result to the exact `public/clips/<CompId>/<sceneN>.mp4` path shown
-4. Resume the workflow with the **same `--run-id`** printed in the failed-run output:
-   ```
-   archon workflow run script-to-meta-ad --no-worktree "<original args>" --run-id <run-id>
+4. Resume the workflow with `--resume`:
+   ```bash
+   archon workflow run script-to-meta-ad --no-worktree --resume "<original args>"
    ```
 
-**Do NOT** start a fresh run after generating clips — that would re-prompt the planner and risk producing different prompts than what's already in `CLIPS-NEEDED.md`. Use the same run-id.
+**Do NOT** start a fresh run after generating clips — that would re-prompt the planner and risk producing different prompts than what's already in `CLIPS-NEEDED.md`. Use `--resume`.
 
 ## When something fails at runtime
 
@@ -40,7 +40,7 @@ The *Troubleshooting* section in `README.md` covers the known failure modes. Mat
 
 - Missing `remotion-best-practices` skill → `npx skills add remotion-dev/skills --yes`
 - `claude` not on PATH → set `CLAUDE_BIN_PATH=` in `.archon/.env`
-- "Skipped (prior_success)" on what should be a fresh run → user is resuming an old run-id; either omit `--run-id` for a fresh run, or use the matching run-id intentionally
+- "Skipped (prior_success)" on what should be a fresh run → archon auto-resumes the last failed run for the same workflow. Force fresh by clearing the matching row: `sqlite3 ~/.archon/archon.db "DELETE FROM remote_agent_workflow_runs WHERE workflow_name='script-to-meta-ad' AND status='failed';"`
 - Captions feel mistimed for natural voice delivery → edit `archon-runs/<run-id>/captions.json` between planner and build, OR adjust the per-caption duration formula constants in the `plan-video` node prompt for a permanent change
 
 ## Assistant choice

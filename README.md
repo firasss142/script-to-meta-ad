@@ -234,19 +234,18 @@ Generate the clips with whatever tool fits per shot:
 - **Kling AI** — image-to-video; takes start frame + end frame + motion prompt
 - **Sora**, **Runway Gen-3**, **Pika** — pick per scene
 
-Save each result to the exact path shown, then **resume with the same
-`workflow_run_id`** (printed in the failed-run output):
+Save each result to the exact path shown, then **resume with `--resume`**:
 
 ```bash
-archon workflow run script-to-meta-ad --no-worktree \
-  "script ./scripts/my-ad-copy.md" \
-  --run-id <run-id-from-the-failed-run>
+archon workflow run script-to-meta-ad --no-worktree --resume \
+  "script ./scripts/my-ad-copy.md"
 ```
 
-Archon caches `plan-video` and audio nodes per `(workflow_run_id, node_id)`,
-so resuming with the same run-id continues from the gate without
-re-prompting Claude (which would risk producing different prompts than the
-ones already in `CLIPS-NEEDED.md`).
+Archon caches `plan-video` and audio nodes per `(workflow_run_id, node_id)`.
+`--resume` picks up the last failed run of this workflow and skips the
+already-completed nodes — so you continue from the gate without re-prompting
+Claude (which would risk producing different prompts than the ones already
+in `CLIPS-NEEDED.md`).
 
 ### Recording your voice over the silent render
 
@@ -311,11 +310,17 @@ Set `CLAUDE_BIN_PATH=/full/path/to/claude` in `.archon/.env`.
 ### Workflow halts saying "delegated clip(s) missing"
 This is **not an error** — it's the gate. Generate the clips per
 `videos/<date>-<slug>/CLIPS-NEEDED.md`, drop into `public/clips/<CompId>/`,
-re-run with the same `--run-id`.
+re-run with `--resume`.
 
-### Workflow says "Skipped (prior_success)" on a fresh run
-You're resuming a prior run, not starting fresh. Use a new workflow run-id
-(omit `--run-id`), or clear the matching row from `archon.db`.
+### Workflow says "Skipped (prior_success)" but you intended a fresh run
+Archon auto-resumes the last failed run for the same workflow. To force a
+genuinely fresh start, clear the matching row from the local archon DB:
+```bash
+sqlite3 ~/.archon/archon.db \
+  "DELETE FROM remote_agent_workflow_runs WHERE workflow_name='script-to-meta-ad' AND status='failed';"
+```
+Or use `--resume` deliberately when you DO want to pick up where the prior
+run failed.
 
 ### `archon validate` errors
 Run `archon validate workflows` and `archon validate commands` after any
