@@ -169,7 +169,10 @@ nodes:
 
       echo "title=$TITLE"
       echo "source_path=$SCRIPT_PATH"
-      echo "aspect_ratio=$RATIO_TOKEN ($WIDTH×$HEIGHT)"
+      # Brace-wrap to force variable-name termination — bash with set -u
+      # otherwise grabs the multibyte × bytes as part of the name and
+      # complains about an unbound variable.
+      echo "aspect_ratio=$RATIO_TOKEN (${WIDTH}x${HEIGHT})"
     depends_on: [check-skill]
     timeout: 15000
 

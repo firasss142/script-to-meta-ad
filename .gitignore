@@ -42,6 +42,26 @@ public/clips/
 # Uncomment to ignore:
 # src/[A-Z]*/
 
+# Remotion project scaffold (created by ensure-remotion-project node on
+# first run). Generated artifacts, not workflow source — regenerated on
+# every fresh clone. Tracking them would conflate workflow code with
+# run-specific output.
+package.json
+package-lock.json
+pnpm-lock.yaml
+bun.lockb
+tsconfig.json
+remotion.config.ts
+eslint.config.mjs
+.prettierrc
+src/Root.tsx
+src/Composition.tsx
+src/index.ts
+src/index.css
+src/compositions.gen.ts
+src/HelloWorld/
+src/MyComp/
+
 # OS / editor
 .DS_Store
 Thumbs.db
